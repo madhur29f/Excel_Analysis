@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import openpyxl
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
@@ -13,10 +14,57 @@ st.set_page_config(page_title="Excel Filter & Export Tool", layout="wide")
 # --- Helper Functions ---
 
 @st.cache_data
-def load_data(file, header_row=0, sheet_name=0):
-    """Loads the Excel file into a dataframe."""
+def load_data(file, header_row=0, sheet_name=0, handle_merged=False):
+    """
+    Loads the Excel file into a dataframe.
+    If handle_merged is True, it uses openpyxl to unmerge cells and replicate values.
+    """
     try:
-        return pd.read_excel(file, header=header_row, sheet_name=sheet_name)
+        if not handle_merged:
+            return pd.read_excel(file, header=header_row, sheet_name=sheet_name)
+        else:
+            # Robust Merged Cell Handling
+            wb = openpyxl.load_workbook(file, data_only=True)
+            
+            # Handle sheet selection
+            if isinstance(sheet_name, int):
+                ws = wb.worksheets[sheet_name]
+            else:
+                ws = wb[sheet_name]
+            
+            # Identify and unmerge cells, replicating the top-left value
+            # We copy the ranges to a list first because we are modifying the collection
+            for range_ in list(ws.merged_cells.ranges):
+                min_col, min_row, max_col, max_row = range_.bounds
+                top_left_value = ws.cell(row=min_row, column=min_col).value
+                
+                # Unmerge
+                ws.unmerge_cells(str(range_))
+                
+                # Fill the unmerged range with the value
+                for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+                    for cell in row:
+                        cell.value = top_left_value
+            
+            # Extract data manually to create DataFrame
+            data = ws.values
+            all_rows = []
+            
+            for i, row in enumerate(data):
+                all_rows.append(list(row))
+            
+            # Slicing for header
+            if header_row < len(all_rows):
+                # Process headers to handle None values
+                raw_headers = all_rows[header_row]
+                headers = [str(h) if h is not None else f"Unnamed: {idx}" for idx, h in enumerate(raw_headers)]
+                
+                # Data rows are everything after header
+                df_data = all_rows[header_row+1:]
+                return pd.DataFrame(df_data, columns=headers)
+            else:
+                return pd.DataFrame(all_rows)
+
     except Exception as e:
         st.error(f"Error loading file: {e}")
         return None
@@ -33,18 +81,9 @@ def convert_df_to_pdf(df):
     output = io.BytesIO()
     
     # --- Dynamic Page Size Logic ---
-    # To make content "slideable" (scrollable) and not cut off:
-    # 1. We calculate required width based on number of columns
-    # 2. We use Paragraphs for text wrapping
-    
     num_cols = len(df.columns)
-    # Estimate min width per column (1.5 inch is decent for reading)
-    # Standard landscape letter is ~11 inches wide
     min_col_width = 1.5 * inch
-    total_page_width = max(11 * inch, num_cols * min_col_width + 1 * inch) # +1 inch for margins
-    
-    # Set page height to standard letter width (since we are technically in landscape orientation logic)
-    # or just use standard 8.5 inch height
+    total_page_width = max(11 * inch, num_cols * min_col_width + 1 * inch)
     page_height = 8.5 * inch 
     
     custom_pagesize = (total_page_width, page_height)
@@ -72,34 +111,27 @@ def convert_df_to_pdf(df):
     cell_style.leading = 11
     
     # Prepare Data: Convert everything to Paragraphs
-    # Header
     header = [Paragraph(f"<b>{str(col)}</b>", cell_style) for col in df.columns]
     data = [header]
     
-    # Rows
     for _, row in df.iterrows():
         row_data = []
         for item in row:
-            # Handle formatting
             text = str(item) if pd.notna(item) else ""
-            # Replace newlines with break tags if necessary
             text = text.replace("\n", "<br/>")
             row_data.append(Paragraph(text, cell_style))
         data.append(row_data)
     
-    # Calculate exact column width based on page size
-    available_width = total_page_width - 1 * inch # remove margins
+    available_width = total_page_width - 1 * inch 
     col_width = available_width / num_cols
     
-    # Create Table with specific column widths
     t = Table(data, colWidths=[col_width] * num_cols)
     
-    # Add style
     style = TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'), # Left align for text reading
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),  # Top align looks better with wrapping
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'), 
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'), 
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
@@ -132,13 +164,14 @@ uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx", "xls"])
 if uploaded_file is not None:
     # 1. Get Sheet Names
     try:
-        xl_file = pd.ExcelFile(uploaded_file)
-        sheet_names = xl_file.sheet_names
+        # Load workbook just to get sheet names without loading all data yet
+        xl = pd.ExcelFile(uploaded_file)
+        sheet_names = xl.sheet_names
     except Exception as e:
         st.error(f"Error reading Excel file structure: {e}")
         st.stop()
 
-    # 2. Settings Columns (Sheet & Header)
+    # 2. Settings Columns
     col_settings_1, col_settings_2 = st.columns(2)
     
     with col_settings_1:
@@ -156,50 +189,86 @@ if uploaded_file is not None:
             help="Change this if your column names are not in the first row."
         )
 
-    # 3. Load Data
+    # 3. Load Data Options
+    process_merged_cells = st.checkbox(
+        "Process Merged Cells (Unmerge & Fill Down)",
+        value=False,
+        help="If checked, cells that are merged in Excel will be unmerged, and the value will be copied to all cells in that range. Useful for filtering grouped rows."
+    )
+
     # Reset file pointer to beginning after reading sheet names
     uploaded_file.seek(0)
     
-    df_original = load_data(uploaded_file, header_row=header_row_index, sheet_name=selected_sheet)
+    with st.spinner("Loading data..."):
+        df_original = load_data(
+            uploaded_file, 
+            header_row=header_row_index, 
+            sheet_name=selected_sheet, 
+            handle_merged=process_merged_cells
+        )
     
     if df_original is not None:
         st.success("File uploaded successfully!")
         
         # Initialize the filtered dataframe
         df_filtered = df_original.copy()
+        all_columns = df_original.columns.tolist()
 
         # Layout: Split into sidebar (Filters) and Main Area (Display)
         
         # --- Sidebar: Row Filtering ---
         st.sidebar.header("Filter Rows")
+        
+        # Reset Button for Row Filters
+        if st.sidebar.button("Reset Row Filters"):
+            st.session_state["row_filter_cols"] = []
+            # Clear specific filter values
+            for key in list(st.session_state.keys()):
+                if key.startswith("row_val_"):
+                    del st.session_state[key]
+            st.rerun() # Force a rerun to update UI immediately
+        
         st.sidebar.markdown("Select columns to filter by value:")
         
         # Step 1: Choose which columns to apply filters to
-        # We assume categorical filtering for simplicity in this UI
         filter_cols = st.sidebar.multiselect(
             "Choose columns to filter rows:",
-            options=df_filtered.columns
+            options=df_filtered.columns,
+            key="row_filter_cols"
         )
         
         # Step 2: Generate dynamic widgets for selected columns
         for col in filter_cols:
-            unique_values = df_original[col].unique()
+            unique_values = df_original[col].dropna().unique() # DropNA to avoid issues with NaN in multiselect
             selected_values = st.sidebar.multiselect(
                 f"Select values for '{col}'",
                 options=unique_values,
-                default=unique_values
+                default=unique_values,
+                key=f"row_val_{col}"
             )
             # Apply Filter
-            df_filtered = df_filtered[df_filtered[col].isin(selected_values)]
+            if selected_values:
+                df_filtered = df_filtered[df_filtered[col].isin(selected_values)]
+            else:
+                # If nothing selected, show nothing? Or show all? Usually empty selection means empty result
+                df_filtered = df_filtered[df_filtered[col].isin([])] 
 
         # --- Main Area: Column Selection & Preview ---
         
-        st.header("2. Select Columns")
-        all_columns = df_original.columns.tolist()
+        col_header, col_reset = st.columns([5, 1])
+        with col_header:
+            st.header("2. Select Columns")
+        with col_reset:
+            st.write("") 
+            if st.button("Reset Column Selection"):
+                st.session_state["final_view_cols"] = all_columns
+                st.rerun()
+
         selected_columns = st.multiselect(
             "Choose which columns to include in the final view:",
             options=all_columns,
-            default=all_columns
+            default=all_columns,
+            key="final_view_cols"
         )
         
         # Apply Column Selection
@@ -218,16 +287,13 @@ if uploaded_file is not None:
         st.header("4. Export Data")
         
         if not df_final.empty:
-            # File Naming Input
             file_name_input = st.text_input("Enter file name for export (without extension):", value="filtered_data")
             
-            # Ensure valid filename (basic check)
             if not file_name_input.strip():
                 file_name_input = "filtered_data"
             
             col1, col2 = st.columns(2)
             
-            # Excel Export
             with col1:
                 excel_data = convert_df_to_excel(df_final)
                 st.download_button(
@@ -237,9 +303,7 @@ if uploaded_file is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-            # PDF Export
             with col2:
-                # Removed the warning since we now support dynamic widths
                 if st.button("Generate PDF Preview"):
                     pdf_data = convert_df_to_pdf(df_final)
                     if pdf_data:
