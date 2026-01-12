@@ -12,10 +12,10 @@ st.set_page_config(page_title="Excel Filter & Export Tool", layout="wide")
 # --- Helper Functions ---
 
 @st.cache_data
-def load_data(file):
+def load_data(file, header_row=0, sheet_name=0):
     """Loads the Excel file into a dataframe."""
     try:
-        return pd.read_excel(file)
+        return pd.read_excel(file, header=header_row, sheet_name=sheet_name)
     except Exception as e:
         st.error(f"Error loading file: {e}")
         return None
@@ -80,8 +80,37 @@ st.header("1. Upload File")
 uploaded_file = st.file_uploader("Choose an Excel file", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
-    # Load Data
-    df_original = load_data(uploaded_file)
+    # 1. Get Sheet Names
+    try:
+        xl_file = pd.ExcelFile(uploaded_file)
+        sheet_names = xl_file.sheet_names
+    except Exception as e:
+        st.error(f"Error reading Excel file structure: {e}")
+        st.stop()
+
+    # 2. Settings Columns (Sheet & Header)
+    col_settings_1, col_settings_2 = st.columns(2)
+    
+    with col_settings_1:
+        selected_sheet = st.selectbox(
+            "Select Worksheet",
+            options=sheet_names
+        )
+
+    with col_settings_2:
+        header_row_index = st.number_input(
+            "Select Header Row Index (0 for first row, etc.)",
+            min_value=0,
+            value=0,
+            step=1,
+            help="Change this if your column names are not in the first row."
+        )
+
+    # 3. Load Data
+    # Reset file pointer to beginning after reading sheet names
+    uploaded_file.seek(0)
+    
+    df_original = load_data(uploaded_file, header_row=header_row_index, sheet_name=selected_sheet)
     
     if df_original is not None:
         st.success("File uploaded successfully!")
