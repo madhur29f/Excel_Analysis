@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import io
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
 
 # --- Page Config ---
 st.set_page_config(page_title="Excel Filter & Export Tool", layout="wide")
@@ -31,33 +32,82 @@ def convert_df_to_pdf(df):
     """Converts dataframe to PDF bytes for download using ReportLab."""
     output = io.BytesIO()
     
-    # Use landscape to fit more columns
-    doc = SimpleDocTemplate(output, pagesize=landscape(letter))
+    # --- Dynamic Page Size Logic ---
+    # To make content "slideable" (scrollable) and not cut off:
+    # 1. We calculate required width based on number of columns
+    # 2. We use Paragraphs for text wrapping
+    
+    num_cols = len(df.columns)
+    # Estimate min width per column (1.5 inch is decent for reading)
+    # Standard landscape letter is ~11 inches wide
+    min_col_width = 1.5 * inch
+    total_page_width = max(11 * inch, num_cols * min_col_width + 1 * inch) # +1 inch for margins
+    
+    # Set page height to standard letter width (since we are technically in landscape orientation logic)
+    # or just use standard 8.5 inch height
+    page_height = 8.5 * inch 
+    
+    custom_pagesize = (total_page_width, page_height)
+    
+    doc = SimpleDocTemplate(
+        output, 
+        pagesize=custom_pagesize,
+        leftMargin=0.5*inch,
+        rightMargin=0.5*inch,
+        topMargin=0.5*inch,
+        bottomMargin=0.5*inch
+    )
     elements = []
     
     # Add Title
     styles = getSampleStyleSheet()
-    title = Paragraph("Filtered Data Report", styles['Title'])
+    title_style = styles['Title']
+    title_style.alignment = 1 # Center
+    title = Paragraph("Filtered Data Report", title_style)
     elements.append(title)
     
-    # Prepare data for Table (Header + Rows)
-    # Convert all data to string to ensure compatibility with ReportLab
-    data = [df.columns.to_list()] + df.astype(str).values.tolist()
+    # Define style for table cells (wraps text)
+    cell_style = styles["Normal"]
+    cell_style.fontSize = 9
+    cell_style.leading = 11
     
-    # Create Table
-    # Layout calculation: simplistic approach, might wrap on very wide tables
-    t = Table(data)
+    # Prepare Data: Convert everything to Paragraphs
+    # Header
+    header = [Paragraph(f"<b>{str(col)}</b>", cell_style) for col in df.columns]
+    data = [header]
+    
+    # Rows
+    for _, row in df.iterrows():
+        row_data = []
+        for item in row:
+            # Handle formatting
+            text = str(item) if pd.notna(item) else ""
+            # Replace newlines with break tags if necessary
+            text = text.replace("\n", "<br/>")
+            row_data.append(Paragraph(text, cell_style))
+        data.append(row_data)
+    
+    # Calculate exact column width based on page size
+    available_width = total_page_width - 1 * inch # remove margins
+    col_width = available_width / num_cols
+    
+    # Create Table with specific column widths
+    t = Table(data, colWidths=[col_width] * num_cols)
     
     # Add style
     style = TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'), # Left align for text reading
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),  # Top align looks better with wrapping
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('FONTSIZE', (0, 0), (-1, -1), 8), # Smaller font for data
+        ('LEFTPADDING', (0, 0), (-1, -1), 5),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+        ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ])
     t.setStyle(style)
     
@@ -168,6 +218,13 @@ if uploaded_file is not None:
         st.header("4. Export Data")
         
         if not df_final.empty:
+            # File Naming Input
+            file_name_input = st.text_input("Enter file name for export (without extension):", value="filtered_data")
+            
+            # Ensure valid filename (basic check)
+            if not file_name_input.strip():
+                file_name_input = "filtered_data"
+            
             col1, col2 = st.columns(2)
             
             # Excel Export
@@ -176,23 +233,20 @@ if uploaded_file is not None:
                 st.download_button(
                     label="📥 Download as Excel (.xlsx)",
                     data=excel_data,
-                    file_name="filtered_data.xlsx",
+                    file_name=f"{file_name_input}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
             # PDF Export
             with col2:
-                # PDF generation can be tricky with too many columns
-                if len(df_final.columns) > 10:
-                    st.warning("⚠️ Warning: PDF export may look cluttered with more than 10 columns.")
-                
+                # Removed the warning since we now support dynamic widths
                 if st.button("Generate PDF Preview"):
                     pdf_data = convert_df_to_pdf(df_final)
                     if pdf_data:
                         st.download_button(
                             label="📥 Download as PDF",
                             data=pdf_data,
-                            file_name="filtered_data.pdf",
+                            file_name=f"{file_name_input}.pdf",
                             mime="application/pdf"
                         )
                     else:
