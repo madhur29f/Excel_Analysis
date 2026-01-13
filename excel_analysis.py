@@ -218,16 +218,6 @@ if uploaded_file is not None:
         
         # --- Sidebar: Row Filtering ---
         st.sidebar.header("Filter Rows")
-        
-        # Reset Button for Row Filters
-        if st.sidebar.button("Reset Row Filters"):
-            st.session_state["row_filter_cols"] = []
-            # Clear specific filter values
-            for key in list(st.session_state.keys()):
-                if key.startswith("row_val_"):
-                    del st.session_state[key]
-            st.rerun() # Force a rerun to update UI immediately
-        
         st.sidebar.markdown("Select columns to filter by value:")
         
         # Step 1: Choose which columns to apply filters to
@@ -255,14 +245,7 @@ if uploaded_file is not None:
 
         # --- Main Area: Column Selection & Preview ---
         
-        col_header, col_reset = st.columns([5, 1])
-        with col_header:
-            st.header("2. Select Columns")
-        with col_reset:
-            st.write("") 
-            if st.button("Reset Column Selection"):
-                st.session_state["final_view_cols"] = all_columns
-                st.rerun()
+        st.header("2. Select Columns")
 
         selected_columns = st.multiselect(
             "Choose which columns to include in the final view:",
